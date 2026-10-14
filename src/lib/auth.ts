@@ -1,8 +1,13 @@
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { cookies } from "next/headers";
 import { and, eq, gt, lt } from "drizzle-orm";
-import { db } from "@/db";
+import { db, ensureSchemaOnce, isDbConnected } from "@/db";
 import { sessions, users } from "@/db/schema";
+import {
+  createMemorySession,
+  deleteMemorySession,
+  getMemorySessionUser,
+} from "@/lib/memory-store";
 
 export const SESSION_COOKIE = "pulse_session";
 const SESSION_TTL_DAYS = 30;
@@ -39,9 +44,17 @@ export async function createSession(userId: number): Promise<void> {
   const token = randomBytes(32).toString("hex");
   const expiresAt = new Date(Date.now() + SESSION_TTL_DAYS * 24 * 60 * 60 * 1000);
 
-  await db.insert(sessions).values({ tokenHash: hashToken(token), userId, expiresAt });
-  // Housekeeping: drop expired sessions for this user.
-  await db.delete(sessions).where(and(eq(sessions.userId, userId), lt(sessions.expiresAt, new Date())));
+  if (isDbConnected()) {
+    try {
+      await ensureSchemaOnce();
+      await db.insert(sessions).values({ tokenHash: hashToken(token), userId, expiresAt });
+      await db.delete(sessions).where(and(eq(sessions.userId, userId), lt(sessions.expiresAt, new Date())));
+    } catch {
+      createMemorySession(hashToken(token), userId, expiresAt);
+    }
+  } else {
+    createMemorySession(hashToken(token), userId, expiresAt);
+  }
 
   const jar = await cookies();
   jar.set(SESSION_COOKIE, token, {
@@ -57,7 +70,16 @@ export async function destroySession(): Promise<void> {
   const jar = await cookies();
   const token = jar.get(SESSION_COOKIE)?.value;
   if (token) {
-    await db.delete(sessions).where(eq(sessions.tokenHash, hashToken(token)));
+    if (isDbConnected()) {
+      try {
+        await ensureSchemaOnce();
+        await db.delete(sessions).where(eq(sessions.tokenHash, hashToken(token)));
+      } catch {
+        deleteMemorySession(hashToken(token));
+      }
+    } else {
+      deleteMemorySession(hashToken(token));
+    }
   }
   jar.delete(SESSION_COOKIE);
 }
@@ -76,21 +98,39 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
   const token = jar.get(SESSION_COOKIE)?.value;
   if (!token) return null;
 
-  const rows = await db
-    .select({
-      id: users.id,
-      username: users.username,
-      displayName: users.displayName,
-      email: users.email,
-      bio: users.bio,
-      avatarHue: users.avatarHue,
-    })
-    .from(sessions)
-    .innerJoin(users, eq(users.id, sessions.userId))
-    .where(and(eq(sessions.tokenHash, hashToken(token)), gt(sessions.expiresAt, new Date())))
-    .limit(1);
+  if (isDbConnected()) {
+    try {
+      await ensureSchemaOnce();
+      const rows = await db
+        .select({
+          id: users.id,
+          username: users.username,
+          displayName: users.displayName,
+          email: users.email,
+          bio: users.bio,
+          avatarHue: users.avatarHue,
+        })
+        .from(sessions)
+        .innerJoin(users, eq(users.id, sessions.userId))
+        .where(and(eq(sessions.tokenHash, hashToken(token)), gt(sessions.expiresAt, new Date())))
+        .limit(1);
 
-  return rows[0] ?? null;
+      if (rows[0]) return rows[0];
+    } catch (err) {
+      console.warn("[Pulse] DB session fetch failed, falling back to memory store:", err);
+    }
+  }
+
+  const memUser = getMemorySessionUser(hashToken(token));
+  if (!memUser) return null;
+  return {
+    id: memUser.id,
+    username: memUser.username,
+    displayName: memUser.displayName,
+    email: memUser.email,
+    bio: memUser.bio,
+    avatarHue: memUser.avatarHue,
+  };
 }
 
 /* ------------------------------ validation ----------------------------- */

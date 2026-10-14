@@ -1,7 +1,8 @@
-import { db } from "@/db";
+import { db, isDbConnected } from "@/db";
 import { posts } from "@/db/schema";
 import { getCurrentUser } from "@/lib/auth";
 import { fail, ok, readJson, str } from "@/lib/http";
+import { createMemoryPost } from "@/lib/memory-store";
 import { listPosts } from "@/lib/queries";
 import type { FeedScope } from "@/lib/types";
 
@@ -42,14 +43,21 @@ export async function POST(request: Request) {
     return fail(`Posts are limited to ${MAX_POST_LENGTH} characters.`, 422);
   }
 
-  const inserted = await db
-    .insert(posts)
-    .values({ authorId: user.id, content })
-    .returning({ id: posts.id });
+  if (isDbConnected()) {
+    try {
+      const inserted = await db
+        .insert(posts)
+        .values({ authorId: user.id, content })
+        .returning({ id: posts.id });
 
-  const created = await listPosts({ viewerId: user.id, limit: 1 });
-  const fresh = created.find((p) => p.id === inserted[0]?.id) ?? created[0];
+      const created = await listPosts({ viewerId: user.id, limit: 1 });
+      const fresh = created.find((p) => p.id === inserted[0]?.id) ?? created[0];
+      return ok({ post: fresh }, { status: 201 });
+    } catch (err) {
+      console.warn("[Pulse] DB post insert failed, using memory store fallback:", err);
+    }
+  }
+
+  const fresh = createMemoryPost(user.id, content);
   return ok({ post: fresh }, { status: 201 });
 }
-
-

@@ -1,0 +1,6 @@
+{
+  "name": "Pulse",
+  "description": "Pulse is a mini social network with profiles, posts, comments, likes and a follow graph, built on Next.js, Drizzle ORM and PostgreSQL.",
+  "capabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"],
+  "permissions": []
+}

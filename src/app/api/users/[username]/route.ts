@@ -1,13 +1,14 @@
 import { eq } from "drizzle-orm";
-import { db } from "@/db";
+import { db, isDbConnected } from "@/db";
 import { users } from "@/db/schema";
 import { getCurrentUser, normalizeUsername } from "@/lib/auth";
 import { fail, ok, readJson, str } from "@/lib/http";
+import { updateMemoryUser } from "@/lib/memory-store";
 import { getProfile } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
 
-type Ctx = { params: Promise<{ username: string }> };
+type Ctx = { params: Promise<{ id?: string; username: string }> };
 
 export async function GET(_request: Request, { params }: Ctx) {
   const { username } = await params;
@@ -32,11 +33,21 @@ export async function PATCH(request: Request, { params }: Ctx) {
 
   if (displayName.length < 2) return fail("Display name must be at least 2 characters.", 422);
 
-  await db
-    .update(users)
-    .set({ displayName, bio })
-    .where(eq(users.id, viewer.id));
+  if (isDbConnected()) {
+    try {
+      await db
+        .update(users)
+        .set({ displayName, bio })
+        .where(eq(users.id, viewer.id));
 
+      const profile = await getProfile(viewer.username, viewer.id);
+      return ok({ profile });
+    } catch (err) {
+      console.warn("[Pulse] DB profile update failed, using memory fallback:", err);
+    }
+  }
+
+  updateMemoryUser(viewer.username, { displayName, bio });
   const profile = await getProfile(viewer.username, viewer.id);
   return ok({ profile });
 }

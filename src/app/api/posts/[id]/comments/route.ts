@@ -1,8 +1,9 @@
 import { eq } from "drizzle-orm";
-import { db } from "@/db";
+import { db, isDbConnected } from "@/db";
 import { comments, posts } from "@/db/schema";
 import { getCurrentUser } from "@/lib/auth";
 import { fail, ok, readJson, str } from "@/lib/http";
+import { createMemoryComment, getMemoryPost } from "@/lib/memory-store";
 import { listComments } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
@@ -33,19 +34,32 @@ export async function POST(request: Request, { params }: Ctx) {
   const content = str(body.content, MAX_COMMENT_LENGTH);
   if (!content) return fail("Your comment cannot be empty.", 422);
 
-  const target = await db
-    .select({ id: posts.id })
-    .from(posts)
-    .where(eq(posts.id, postId))
-    .limit(1);
-  if (!target[0]) return fail("Post not found.", 404);
+  if (isDbConnected()) {
+    try {
+      const target = await db
+        .select({ id: posts.id })
+        .from(posts)
+        .where(eq(posts.id, postId))
+        .limit(1);
+      if (!target[0]) return fail("Post not found.", 404);
 
-  const inserted = await db
-    .insert(comments)
-    .values({ postId, authorId: user.id, content })
-    .returning({ id: comments.id });
+      const inserted = await db
+        .insert(comments)
+        .values({ postId, authorId: user.id, content })
+        .returning({ id: comments.id });
 
+      const list = await listComments(postId, user.id);
+      const created = list.find((c) => c.id === inserted[0]?.id) ?? list[list.length - 1];
+      return ok({ comment: created, comments: list }, { status: 201 });
+    } catch (err) {
+      console.warn("[Pulse] DB insert comment failed, using memory fallback:", err);
+    }
+  }
+
+  const post = getMemoryPost(postId, user.id);
+  if (!post) return fail("Post not found.", 404);
+
+  const comment = createMemoryComment(postId, user.id, content);
   const list = await listComments(postId, user.id);
-  const created = list.find((c) => c.id === inserted[0]?.id) ?? list[list.length - 1];
-  return ok({ comment: created, comments: list }, { status: 201 });
+  return ok({ comment, comments: list }, { status: 201 });
 }
